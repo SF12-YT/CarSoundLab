@@ -130,6 +130,10 @@ class F1AudioEngine(private val assetManager: AssetManager) {
 
     @Synchronized
     fun stop() {
+        // Never leave a stale pedal input active across a stop/restart or interrupted gesture.
+        throttleInput = 0.0
+        brakeInput = 0.0
+        drsInput = false
         running = false
         val oldThread = telemetryThread
         var interrupted = false

@@ -71,6 +71,7 @@ public:
         // Decode bundled shift one-shots before starting the real-time callback. Missing
         // sample assets are non-fatal: the existing synthesised engine remains available.
         loadShiftSamples();
+        loadReferenceLoop();
         configureFilters();
         const int32_t burst = stream_->getFramesPerBurst();
         if (burst > 0) stream_->setBufferSizeInFrames(burst * 2);
@@ -246,8 +247,6 @@ private:
     }
 
     void renderOne(float throttleInput, float brakeInput, float& outLeft, float& outRight) {
-        const double rpmBefore = rpm_;
-        const double speedBefore = speedMps_;
         smoothedThrottle_ += (static_cast<double>(throttleInput) - smoothedThrottle_) * (1.0 - std::exp(-dt_ * 34.0));
         const double throttle = clampd(smoothedThrottle_, 0.0, 1.0);
         const double brake = clampd(static_cast<double>(brakeInput), 0.0, 1.0);
@@ -271,10 +270,10 @@ private:
         wheelLocked_ = targetWheelLockedBlock_ != 0;
         drsActive_ = targetDrsActiveBlock_ != 0;
 
-        const bool rpmIncreasing = rpm_ > rpmBefore;
-        const bool speedIncreasing = speedMps_ > speedBefore;
-        const bool speedDroppingAtHighRpm = speedMps_ < speedBefore && rpm_ >= kRedlineRpm * 0.60;
-        const bool accelerating = rpmIncreasing && speedIncreasing && !speedDroppingAtHighRpm;
+        // Audio load must follow the driver's pedal, not whether RPM/speed happen to rise
+        // during this one sample. The old test made a sustained high-RPM note fall to 30%
+        // whenever the telemetry settled, even with the throttle still held down.
+        const bool accelerating = throttle > 0.08 && brake < 0.95;
         const double normalizedSpeed = clampd(speedMps_ / 98.0, 0.0, 1.0);
         const double rpmBrightness = clampd((rpm_ - kIdleRpm) / (kRedlineRpm - kIdleRpm), 0.0, 1.0);
         const double turboTarget = clampd(throttle * 0.79 + rpm_ / kRedlineRpm * 0.21, 0.0, 1.0);
@@ -461,8 +460,16 @@ private:
 
         const double engineRawLeft = combustionLeft + intakePlenum + exhaustTone + exhaustMode + exhaustPulseBloom + lowGearLayer + metallicLayer + firingAttack;
         const double engineRawRight = combustionRight + intakePlenum + exhaustTone + exhaustMode + exhaustPulseBloom + lowGearLayer + metallicLayer + firingAttack;
-        double engineLeft = (accelerating ? std::tanh(engineRawLeft * 2.35) * 1.22 : engineRawLeft * 0.30) * loadGain * limiterGain;
-        double engineRight = (accelerating ? std::tanh(engineRawRight * 2.35) * 1.22 : engineRawRight * 0.30) * loadGain * limiterGain;
+        // Crossfade between a quieter overrun sound and the loaded engine sound based on
+        // throttle position. This stays fully loaded at steady RPM, and lifts smoothly rather
+        // than switching abruptly when an RPM derivative reaches zero.
+        const double loadedBlend = clampd((throttle - 0.015) / 0.20, 0.0, 1.0);
+        const double drivenLeft = std::tanh(engineRawLeft * 2.35) * 1.22;
+        const double drivenRight = std::tanh(engineRawRight * 2.35) * 1.22;
+        const double coastLeft = engineRawLeft * 0.30;
+        const double coastRight = engineRawRight * 0.30;
+        double engineLeft = (coastLeft + (drivenLeft - coastLeft) * loadedBlend) * loadGain * limiterGain;
+        double engineRight = (coastRight + (drivenRight - coastRight) * loadedBlend) * loadGain * limiterGain;
 
         const double click = upshiftClickRemaining_ > 0.0 ?
             (0.76 * noise() + 0.42 * std::sin(gearClickPhase_)) * std::pow(clampd(upshiftClickRemaining_ / 0.005, 0.0, 1.0), 2.0) : 0.0;
@@ -481,8 +488,11 @@ private:
         // Mild output saturation plus a final hard clip in onAudioReady().
         outLeft = static_cast<float>(leftMasterCompressor_.process(sampleLeft) * 1.62);
         outRight = static_cast<float>(rightMasterCompressor_.process(sampleRight) * 1.62);
-        // A low-gain recorded shift transient enriches the procedural bed. It is added after
-        // the master compressor so the full onboard mix does not pump the synthetic engine.
+        // At matching high-speed operating points, fade toward a real stereo RB21 onboard
+        // segment rather than forcing the synthesizer to carry the whole timbre. The loop is
+        // a 5.2 s eighth-gear section from the supplied Monza recording, crossfaded at its seam.
+        mixReferenceLoop(outLeft, outRight, throttle, brake);
+        // Brief recorded gear-change transients stay above the continuous bed.
         mixShiftSample(outLeft, outRight);
 
         if (upshiftCutRemaining_ > 0.0) {
@@ -624,6 +634,58 @@ private:
         }
     }
 
+    void loadReferenceLoop() {
+        ShiftSample sample;
+        if (readPcm16WavAsset("reference_high_speed_loop.wav", sample)) {
+            referenceHighSpeedLoop_ = std::move(sample);
+        }
+    }
+
+    void mixReferenceLoop(float& left, float& right, double throttle, double brake) {
+        const ShiftSample* sample = &referenceHighSpeedLoop_;
+        if (sample->pcm.empty() || sample->channels < 1 || sample->sampleRate <= 0) {
+            referenceLoopGain_ = 0.0;
+            return;
+        }
+        const double speedKmh = speedMps_ * 3.6;
+        // The source excerpt is a steady, high-load eighth-gear pass around 11,400 RPM.
+        // Keep it confined to a similar point so wind/road content isn't misused as a generic
+        // stationary rev sample. Elsewhere the model falls back smoothly to the synthesized bed.
+        const bool referenceState = gear_ == 8 && speedKmh >= 300.0 &&
+                rpm_ >= 10700.0 && rpm_ <= 11850.0 && throttle >= 0.68 && brake < 0.12;
+        const double targetGain = referenceState ? 0.68 : 0.0;
+        const double response = targetGain > referenceLoopGain_ ? 5.0 : 8.0;
+        referenceLoopGain_ += (targetGain - referenceLoopGain_) * (1.0 - std::exp(-dt_ * response));
+        if (referenceLoopGain_ < 1.0e-5) {
+            referenceLoopGain_ = 0.0;
+            return;
+        }
+
+        const size_t frames = sample->pcm.size() / static_cast<size_t>(sample->channels);
+        if (frames < 2) { referenceLoopGain_ = 0.0; return; }
+        const double wrappedPosition = std::fmod(referenceLoopPosition_, static_cast<double>(frames));
+        const size_t index = static_cast<size_t>(wrappedPosition);
+        const size_t nextIndex = (index + 1u) % frames;
+        const double fraction = wrappedPosition - static_cast<double>(index);
+        auto getChannel = [&](size_t frame, int channel) -> double {
+            const int c = sample->channels == 1 ? 0 : channel;
+            return static_cast<double>(sample->pcm[frame * static_cast<size_t>(sample->channels) + static_cast<size_t>(c)]) / 32768.0;
+        };
+        const double sampleLeft0 = getChannel(index, 0);
+        const double sampleLeft1 = getChannel(nextIndex, 0);
+        const double sampleRight0 = getChannel(index, 1);
+        const double sampleRight1 = getChannel(nextIndex, 1);
+        constexpr double kReferenceLoopTrim = 1.35; // matches the procedural bed's perceived level
+        const double referenceLeft = (sampleLeft0 + (sampleLeft1 - sampleLeft0) * fraction) * kReferenceLoopTrim;
+        const double referenceRight = (sampleRight0 + (sampleRight1 - sampleRight0) * fraction) * kReferenceLoopTrim;
+        left = static_cast<float>(left * (1.0 - referenceLoopGain_) + referenceLeft * referenceLoopGain_);
+        right = static_cast<float>(right * (1.0 - referenceLoopGain_) + referenceRight * referenceLoopGain_);
+        referenceLoopPosition_ += static_cast<double>(sample->sampleRate) / static_cast<double>(sampleRate_);
+        if (referenceLoopPosition_ >= static_cast<double>(frames)) {
+            referenceLoopPosition_ = std::fmod(referenceLoopPosition_, static_cast<double>(frames));
+        }
+    }
+
     void triggerShiftSample(int from, int to) {
         activeShiftSample_ = nullptr;
         activeShiftPosition_ = 0.0;
@@ -666,6 +728,9 @@ private:
     AAssetManager* assetManager_ = nullptr;
     std::unordered_map<int, std::vector<ShiftSample>> shiftSamples_;
     std::unordered_map<int, size_t> shiftSampleCursors_;
+    ShiftSample referenceHighSpeedLoop_;
+    double referenceLoopPosition_ = 0.0;
+    double referenceLoopGain_ = 0.0;
     const ShiftSample* activeShiftSample_ = nullptr; // immutable after stream start
     double activeShiftPosition_ = 0.0;
     std::shared_ptr<oboe::AudioStream> stream_;

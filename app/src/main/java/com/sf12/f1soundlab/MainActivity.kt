@@ -5,6 +5,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,8 +31,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -40,11 +41,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -57,7 +60,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sf12.f1soundlab.audio.EngineTelemetry
 import com.sf12.f1soundlab.audio.F1AudioEngine
-import com.sf12.f1soundlab.ui.F1CarIllustration
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -133,7 +135,6 @@ private fun CarSoundLabScreen() {
             AppHeader(running = running)
             TelemetryPanel(telemetry = telemetry, running = running)
             CarPanel(
-                wheelSpeed = telemetry.speedKmh,
                 wheelLocked = telemetry.wheelLocked,
                 drsOpen = telemetry.drsActive
             )
@@ -161,6 +162,9 @@ private fun CarSoundLabScreen() {
             Button(
                 onClick = {
                     if (running) {
+                        throttle = 0f
+                        brake = 0f
+                        engine.setPedals(0.0, 0.0)
                         engine.stop()
                         telemetry = EngineTelemetry()
                         running = false
@@ -321,7 +325,7 @@ private fun TelemetryPanel(telemetry: EngineTelemetry, running: Boolean) {
 }
 
 @Composable
-private fun CarPanel(wheelSpeed: Int, wheelLocked: Boolean, drsOpen: Boolean) {
+private fun CarPanel(wheelLocked: Boolean, drsOpen: Boolean) {
     Surface(
         color = Panel,
         shape = RoundedCornerShape(22.dp),
@@ -337,11 +341,11 @@ private fun CarPanel(wheelSpeed: Int, wheelLocked: Boolean, drsOpen: Boolean) {
                 Text(if (drsOpen) "DRS OPEN" else "25  /  HYBRID ERA", color = if (drsOpen) Amber else Mint, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
             }
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                F1CarIllustration(
-                    modifier = Modifier.fillMaxWidth().aspectRatio(4.28f),
-                    wheelSpeed = wheelSpeed,
-                    wheelLocked = wheelLocked,
-                    drsOpen = drsOpen
+                Image(
+                    painter = painterResource(R.drawable.rb21_side_profile),
+                    contentDescription = "2025 Red Bull Racing RB21 side profile with Pirelli tyres",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth().aspectRatio(4.28f)
                 )
             }
             Row(
@@ -432,34 +436,38 @@ private fun PedalPanel(
                 Spacer(Modifier.weight(1f))
                 Text("0–100%", color = Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
             }
-            PedalSlider(
+            HoldPedal(
                 label = "THROTTLE PEDAL",
                 value = throttle,
                 color = Mint,
-                hint = "POWER",
-                onValueChange = onThrottleChange
+                hint = "HOLD TO APPLY POWER · RELEASE TO RETURN TO 0%",
+                onPressed = { pressed -> onThrottleChange(if (pressed) 100f else 0f) }
             )
             Box(Modifier.fillMaxWidth().height(1.dp).background(Hairline))
-            PedalSlider(
+            HoldPedal(
                 label = "BRAKING PEDAL",
                 value = brake,
                 color = Amber,
-                hint = "LOCK-UP ≥72% / 0.8S",
-                onValueChange = onBrakeChange
+                hint = "HOLD TO BRAKE · LOCK-UP ≥72% AFTER 0.8S",
+                onPressed = { pressed -> onBrakeChange(if (pressed) 100f else 0f) }
             )
         }
     }
 }
 
 @Composable
-private fun PedalSlider(
+private fun HoldPedal(
     label: String,
     value: Float,
     color: Color,
     hint: String,
-    onValueChange: (Float) -> Unit
+    onPressed: (Boolean) -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    val latestOnPressed = rememberUpdatedState(onPressed)
+    val pressed = value > 0f
+    val shape = RoundedCornerShape(15.dp)
+
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(7.dp).clip(CircleShape).background(color))
             Spacer(Modifier.width(7.dp))
@@ -467,18 +475,35 @@ private fun PedalSlider(
             Spacer(Modifier.weight(1f))
             Text("${value.roundToInt()}%", color = color, fontSize = 17.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
         }
-        Slider(
-            value = value,
-            onValueChange = onValueChange,
-            valueRange = 0f..100f,
-            colors = SliderDefaults.colors(
-                thumbColor = color,
-                activeTrackColor = color,
-                inactiveTrackColor = Hairline,
-                activeTickColor = color,
-                inactiveTickColor = Hairline
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(62.dp)
+                .clip(shape)
+                .background(if (pressed) color.copy(alpha = 0.17f) else PanelRaised)
+                .border(1.dp, if (pressed) color else Hairline, shape)
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        latestOnPressed.value(true)
+                        try {
+                            waitForUpOrCancellation()
+                        } finally {
+                            // Release and cancellation both release the pedal immediately.
+                            latestOnPressed.value(false)
+                        }
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (pressed) "APPLIED  ·  RELEASE TO LIFT" else "PRESS AND HOLD",
+                color = if (pressed) color else White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 1.1.sp
             )
-        )
-        Text(hint, color = Muted, fontSize = 8.sp, letterSpacing = 1.5.sp, modifier = Modifier.align(Alignment.End))
+        }
+        Text(hint, color = Muted, fontSize = 8.sp, letterSpacing = 0.7.sp, modifier = Modifier.align(Alignment.End))
     }
 }

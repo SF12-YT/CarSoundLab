@@ -13,8 +13,8 @@ android {
         applicationId = "com.sf12.f1soundlab"
         minSdk = 26
         targetSdk = 36
-        versionCode = 22
-        versionName = "1.21.0"
+        versionCode = 23
+        versionName = "1.22.0"
 
         externalNativeBuild {
             cmake {
