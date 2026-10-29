@@ -1,0 +1,75 @@
+name: Build Car Sound Lab APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 cmake;3.22.1 ndk;27.2.12479018'
+
+      - name: Set up Gradle 8.14.4
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.14.4'
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Verify reference assets are packaged byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          for NAME in MONZARB21.mp3 MONZARB21.txt; do
+            SOURCE="app/src/main/assets/reference-laps/${NAME}"
+            APK_PATH="assets/reference-laps/${NAME}"
+            test -s "$SOURCE"
+            unzip -Z1 "$APK" | grep -Fx "$APK_PATH" >/dev/null
+            unzip -p "$APK" "$APK_PATH" > "$RUNNER_TEMP/${NAME}"
+            cmp "$SOURCE" "$RUNNER_TEMP/${NAME}"
+            echo "Verified packaged asset: ${APK_PATH}"
+            sha256sum "$SOURCE"
+          done
+
+      - name: Package complete source tree
+        run: |
+          zip -qr CarSoundLab_v1.21.0_ReferenceHybrid_FullSource.zip . \
+            -x '.git/*' '*/.git/*' \
+               '.gradle/*' '*/.gradle/*' \
+               'app/build/*' '*/build/*' \
+               'local.properties' '*.jks' '*.keystore' \
+               'CarSoundLab_v1.21.0_ReferenceHybrid_FullSource.zip'
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: car-sound-lab-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload full source artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: car-sound-lab-reference-hybrid-source
+          path: CarSoundLab_v1.21.0_ReferenceHybrid_FullSource.zip
+          if-no-files-found: error

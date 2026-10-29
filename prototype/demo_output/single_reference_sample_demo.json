@@ -1,0 +1,39 @@
+{
+  "purpose": "Demonstrates source-preserving sample selection with the earlier 32.5-second MONZARB21 reference only. It does not include the five newly uploaded full 2025 pole laps.",
+  "source_file": "MONZARB21_reference_32s.wav",
+  "source_duration_s": 32.509,
+  "sample_rate_hz": 44100,
+  "channels": 2,
+  "sections": [
+    {
+      "section": "steady_high_speed",
+      "source_start_s": 8.0,
+      "source_end_s": 10.55,
+      "duration_s": 2.55,
+      "processing": "source excerpt, 8ms boundary fade, no pitch shift"
+    },
+    {
+      "section": "downshift_context",
+      "source_start_s": 13.25,
+      "source_end_s": 15.15,
+      "duration_s": 1.9,
+      "processing": "source excerpt, 8ms boundary fade, no pitch shift"
+    },
+    {
+      "section": "acceleration_upshift_context",
+      "source_start_s": 19.1,
+      "source_end_s": 22.75,
+      "duration_s": 3.65,
+      "processing": "source excerpt, 8ms boundary fade, no pitch shift"
+    },
+    {
+      "section": "late_lap_context",
+      "source_start_s": 25.3,
+      "source_end_s": 28.2,
+      "duration_s": 2.9,
+      "processing": "source excerpt, 8ms boundary fade, no pitch shift"
+    }
+  ],
+  "pitch_shift": 0,
+  "synthesized_audio": false
+}
