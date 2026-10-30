@@ -51,14 +51,29 @@ jobs:
             sha256sum "$SOURCE"
           done
 
+          for SPEC in "reference_high_speed_loop.wav:suzuka_35_high_speed_full_throttle.wav" "reference_corner_exit_loop.wav:suzuka_37_corner_exit.wav"; do
+            NAME="${SPEC%%:*}"
+            SOURCE_NAME="${SPEC#*:}"
+            SOURCE="prototype/sample-bank-output/suzuka/${SOURCE_NAME}"
+            APP_SOURCE="app/src/main/assets/sample-bank/${NAME}"
+            APK_PATH="assets/sample-bank/${NAME}"
+            test -s "$SOURCE"
+            cmp "$SOURCE" "$APP_SOURCE"
+            unzip -Z1 "$APK" | grep -Fx "$APK_PATH" >/dev/null
+            unzip -p "$APK" "$APK_PATH" > "$RUNNER_TEMP/${NAME}"
+            cmp "$SOURCE" "$RUNNER_TEMP/${NAME}"
+            echo "Verified packaged recording: ${APK_PATH}"
+            sha256sum "$SOURCE"
+          done
+
       - name: Package complete source tree
         run: |
-          zip -qr CarSoundLab_v1.21.0_ReferenceHybrid_FullSource.zip . \
+          zip -qr CarSoundLab_v1.23.0_RecordingDriven_FullSource.zip . \
             -x '.git/*' '*/.git/*' \
                '.gradle/*' '*/.gradle/*' \
                'app/build/*' '*/build/*' \
                'local.properties' '*.jks' '*.keystore' \
-               'CarSoundLab_v1.21.0_ReferenceHybrid_FullSource.zip'
+               'CarSoundLab_v1.23.0_RecordingDriven_FullSource.zip'
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7
@@ -70,6 +85,6 @@ jobs:
       - name: Upload full source artifact
         uses: actions/upload-artifact@v7
         with:
-          name: car-sound-lab-reference-hybrid-source
-          path: CarSoundLab_v1.21.0_ReferenceHybrid_FullSource.zip
+          name: car-sound-lab-recording-driven-source
+          path: CarSoundLab_v1.23.0_RecordingDriven_FullSource.zip
           if-no-files-found: error

@@ -492,6 +492,7 @@ private:
         // segment rather than forcing the synthesizer to carry the whole timbre. The loop is
         // a 5.2 s eighth-gear section from the supplied Monza recording, crossfaded at its seam.
         mixReferenceLoop(outLeft, outRight, throttle, brake);
+        mixCornerExitLoop(outLeft, outRight, throttle, brake);
         // Brief recorded gear-change transients stay above the continuous bed.
         mixShiftSample(outLeft, outRight);
 
@@ -635,54 +636,92 @@ private:
     }
 
     void loadReferenceLoop() {
-        ShiftSample sample;
-        if (readPcm16WavAsset("reference_high_speed_loop.wav", sample)) {
-            referenceHighSpeedLoop_ = std::move(sample);
+        ShiftSample highSpeed;
+        if (readPcm16WavAsset("reference_high_speed_loop.wav", highSpeed)) {
+            referenceHighSpeedLoop_ = std::move(highSpeed);
+        }
+        ShiftSample cornerExit;
+        if (readPcm16WavAsset("reference_corner_exit_loop.wav", cornerExit)) {
+            referenceCornerExitLoop_ = std::move(cornerExit);
         }
     }
 
     void mixReferenceLoop(float& left, float& right, double throttle, double brake) {
-        const ShiftSample* sample = &referenceHighSpeedLoop_;
-        if (sample->pcm.empty() || sample->channels < 1 || sample->sampleRate <= 0) {
-            referenceLoopGain_ = 0.0;
+        const double speedKmh = speedMps_ * 3.6;
+        // Stable seventh-gear RB21 onboard passage: use only at its matching high-speed state.
+        const bool referenceState = (gear_ == 7 || gear_ == 8) &&
+                speedKmh >= 265.0 && speedKmh <= 350.0 &&
+                rpm_ >= 10500.0 && rpm_ <= 12800.0 && throttle >= 0.72 && brake < 0.12;
+        mixLoopSample(referenceHighSpeedLoop_, referenceLoopPosition_, referenceLoopGain_,
+                referenceState ? 0.88 : 0.0, 11771.0, 1.22, left, right);
+    }
+
+    void mixCornerExitLoop(float& left, float& right, double throttle, double brake) {
+        const double speedKmh = speedMps_ * 3.6;
+        // Recorded third-gear corner exit; never use it as an idle or unrelated rev sample.
+        const bool referenceState = gear_ == 3 && speedKmh >= 52.0 && speedKmh <= 128.0 &&
+                rpm_ >= 5400.0 && rpm_ <= 8000.0 &&
+                throttle >= 0.18 && throttle <= 0.72 && brake < 0.16;
+        mixLoopSample(referenceCornerExitLoop_, referenceCornerExitPosition_, referenceCornerExitGain_,
+                referenceState ? 0.78 : 0.0, 6561.0, 1.18, left, right);
+    }
+
+    void mixLoopSample(const ShiftSample& sample, double& position, double& currentGain,
+                       double targetGain, double sourceRpm, double trim,
+                       float& left, float& right) {
+        if (sample.pcm.empty() || sample.channels < 1 || sample.sampleRate <= 0) {
+            currentGain = 0.0;
             return;
         }
-        const double speedKmh = speedMps_ * 3.6;
-        // The source excerpt is a steady, high-load eighth-gear pass around 11,400 RPM.
-        // Keep it confined to a similar point so wind/road content isn't misused as a generic
-        // stationary rev sample. Elsewhere the model falls back smoothly to the synthesized bed.
-        const bool referenceState = gear_ == 8 && speedKmh >= 300.0 &&
-                rpm_ >= 10700.0 && rpm_ <= 11850.0 && throttle >= 0.68 && brake < 0.12;
-        const double targetGain = referenceState ? 0.68 : 0.0;
-        const double response = targetGain > referenceLoopGain_ ? 5.0 : 8.0;
-        referenceLoopGain_ += (targetGain - referenceLoopGain_) * (1.0 - std::exp(-dt_ * response));
-        if (referenceLoopGain_ < 1.0e-5) {
-            referenceLoopGain_ = 0.0;
+        const size_t frames = sample.pcm.size() / static_cast<size_t>(sample.channels);
+        if (frames < 16) { currentGain = 0.0; return; }
+        const double response = targetGain > currentGain ? 7.5 : 10.0;
+        currentGain += (targetGain - currentGain) * (1.0 - std::exp(-dt_ * response));
+        if (currentGain < 1.0e-5) {
+            currentGain = 0.0;
             return;
         }
 
-        const size_t frames = sample->pcm.size() / static_cast<size_t>(sample->channels);
-        if (frames < 2) { referenceLoopGain_ = 0.0; return; }
-        const double wrappedPosition = std::fmod(referenceLoopPosition_, static_cast<double>(frames));
-        const size_t index = static_cast<size_t>(wrappedPosition);
-        const size_t nextIndex = (index + 1u) % frames;
-        const double fraction = wrappedPosition - static_cast<double>(index);
-        auto getChannel = [&](size_t frame, int channel) -> double {
-            const int c = sample->channels == 1 ? 0 : channel;
-            return static_cast<double>(sample->pcm[frame * static_cast<size_t>(sample->channels) + static_cast<size_t>(c)]) / 32768.0;
+        // Crossfade the last ~100 ms into the beginning; resume after the overlap on wrap.
+        const size_t fadeFrames = std::min(
+                static_cast<size_t>(sample.sampleRate / 10),
+                std::max<size_t>(1u, frames / 4u));
+        const size_t loopStart = frames - fadeFrames;
+        const double safePosition = std::clamp(position, 0.0, static_cast<double>(frames - 1u));
+        const double pitchFollow = clampd(rpm_ / std::max(1.0, sourceRpm), 0.88, 1.12);
+        const double rate = (static_cast<double>(sample.sampleRate) / static_cast<double>(sampleRate_)) * pitchFollow;
+
+        auto sampleAt = [&](double framePosition, int channel) -> double {
+            const double clamped = std::clamp(framePosition, 0.0, static_cast<double>(frames - 1u));
+            const size_t frame0 = static_cast<size_t>(clamped);
+            const size_t frame1 = std::min(frame0 + 1u, frames - 1u);
+            const double blend = clamped - static_cast<double>(frame0);
+            const int c = sample.channels == 1 ? 0 : channel;
+            const double first = static_cast<double>(sample.pcm[frame0 * static_cast<size_t>(sample.channels) +
+                                                                  static_cast<size_t>(c)]) / 32768.0;
+            const double second = static_cast<double>(sample.pcm[frame1 * static_cast<size_t>(sample.channels) +
+                                                                   static_cast<size_t>(c)]) / 32768.0;
+            return first + (second - first) * blend;
         };
-        const double sampleLeft0 = getChannel(index, 0);
-        const double sampleLeft1 = getChannel(nextIndex, 0);
-        const double sampleRight0 = getChannel(index, 1);
-        const double sampleRight1 = getChannel(nextIndex, 1);
-        constexpr double kReferenceLoopTrim = 1.35; // matches the procedural bed's perceived level
-        const double referenceLeft = (sampleLeft0 + (sampleLeft1 - sampleLeft0) * fraction) * kReferenceLoopTrim;
-        const double referenceRight = (sampleRight0 + (sampleRight1 - sampleRight0) * fraction) * kReferenceLoopTrim;
-        left = static_cast<float>(left * (1.0 - referenceLoopGain_) + referenceLeft * referenceLoopGain_);
-        right = static_cast<float>(right * (1.0 - referenceLoopGain_) + referenceRight * referenceLoopGain_);
-        referenceLoopPosition_ += static_cast<double>(sample->sampleRate) / static_cast<double>(sampleRate_);
-        if (referenceLoopPosition_ >= static_cast<double>(frames)) {
-            referenceLoopPosition_ = std::fmod(referenceLoopPosition_, static_cast<double>(frames));
+
+        double sourceLeft = sampleAt(safePosition, 0);
+        double sourceRight = sampleAt(safePosition, 1);
+        if (safePosition >= static_cast<double>(loopStart)) {
+            const double seamBlend = clampd(
+                    (safePosition - static_cast<double>(loopStart)) / static_cast<double>(fadeFrames), 0.0, 1.0);
+            const double startPosition = safePosition - static_cast<double>(loopStart);
+            sourceLeft = sourceLeft * (1.0 - seamBlend) + sampleAt(startPosition, 0) * seamBlend;
+            sourceRight = sourceRight * (1.0 - seamBlend) + sampleAt(startPosition, 1) * seamBlend;
+        }
+        const double gain = currentGain;
+        left = static_cast<float>(static_cast<double>(left) * (1.0 - gain) + sourceLeft * trim * gain);
+        right = static_cast<float>(static_cast<double>(right) * (1.0 - gain) + sourceRight * trim * gain);
+
+        position += rate;
+        if (position >= static_cast<double>(frames)) {
+            position = static_cast<double>(fadeFrames) +
+                    std::fmod(position - static_cast<double>(frames),
+                              static_cast<double>(std::max<size_t>(1u, loopStart)));
         }
     }
 
@@ -729,8 +768,11 @@ private:
     std::unordered_map<int, std::vector<ShiftSample>> shiftSamples_;
     std::unordered_map<int, size_t> shiftSampleCursors_;
     ShiftSample referenceHighSpeedLoop_;
+    ShiftSample referenceCornerExitLoop_;
     double referenceLoopPosition_ = 0.0;
     double referenceLoopGain_ = 0.0;
+    double referenceCornerExitPosition_ = 0.0;
+    double referenceCornerExitGain_ = 0.0;
     const ShiftSample* activeShiftSample_ = nullptr; // immutable after stream start
     double activeShiftPosition_ = 0.0;
     std::shared_ptr<oboe::AudioStream> stream_;

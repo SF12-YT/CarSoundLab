@@ -7,18 +7,20 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -48,6 +50,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.consume
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -440,16 +443,16 @@ private fun PedalPanel(
                 label = "THROTTLE PEDAL",
                 value = throttle,
                 color = Mint,
-                hint = "HOLD TO APPLY POWER · RELEASE TO RETURN TO 0%",
-                onPressed = { pressed -> onThrottleChange(if (pressed) 100f else 0f) }
+                hint = "DRAG TO APPLY POWER · HOLD POSITION · RELEASE TO RETURN TO 0%",
+                onValueChange = onThrottleChange
             )
             Box(Modifier.fillMaxWidth().height(1.dp).background(Hairline))
             HoldPedal(
                 label = "BRAKING PEDAL",
                 value = brake,
                 color = Amber,
-                hint = "HOLD TO BRAKE · LOCK-UP ≥72% AFTER 0.8S",
-                onPressed = { pressed -> onBrakeChange(if (pressed) 100f else 0f) }
+                hint = "DRAG TO BRAKE · HOLD POSITION · RELEASE TO RETURN TO 0%",
+                onValueChange = onBrakeChange
             )
         }
     }
@@ -461,10 +464,10 @@ private fun HoldPedal(
     value: Float,
     color: Color,
     hint: String,
-    onPressed: (Boolean) -> Unit
+    onValueChange: (Float) -> Unit
 ) {
-    val latestOnPressed = rememberUpdatedState(onPressed)
-    val pressed = value > 0f
+    val latestOnValueChange = rememberUpdatedState(onValueChange)
+    val progress = (value / 100f).coerceIn(0f, 1f)
     val shape = RoundedCornerShape(15.dp)
 
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -475,33 +478,75 @@ private fun HoldPedal(
             Spacer(Modifier.weight(1f))
             Text("${value.roundToInt()}%", color = color, fontSize = 17.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
         }
-        Box(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(62.dp)
                 .clip(shape)
-                .background(if (pressed) color.copy(alpha = 0.17f) else PanelRaised)
-                .border(1.dp, if (pressed) color else Hairline, shape)
+                .background(PanelRaised)
+                .border(1.dp, if (value > 0f) color else Hairline, shape)
                 .pointerInput(Unit) {
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        latestOnPressed.value(true)
-                        try {
-                            waitForUpOrCancellation()
-                        } finally {
-                            // Release and cancellation both release the pedal immediately.
-                            latestOnPressed.value(false)
+                    try {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val pointerId = down.id
+                            fun updateAt(x: Float) {
+                                val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                                latestOnValueChange.value((x / widthPx * 100f).coerceIn(0f, 100f))
+                            }
+                            try {
+                                down.consume()
+                                updateAt(down.position.x)
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                                    if (!change.pressed) break
+                                    updateAt(change.position.x)
+                                    change.consume()
+                                }
+                            } finally {
+                                latestOnValueChange.value(0f)
+                            }
                         }
+                    } finally {
+                        latestOnValueChange.value(0f)
                     }
                 },
             contentAlignment = Alignment.Center
         ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxWidth(progress)
+                    .fillMaxHeight()
+                    .background(color.copy(alpha = if (value > 0f) 0.24f else 0.0f))
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp)
+                    .height(4.dp)
+                    .clip(CircleShape)
+                    .background(Hairline)
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset(x = (maxWidth * progress - 10.dp).coerceIn(0.dp, maxWidth - 20.dp))
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(color)
+                    .border(2.dp, Night, CircleShape)
+            )
             Text(
-                text = if (pressed) "APPLIED  ·  RELEASE TO LIFT" else "PRESS AND HOLD",
-                color = if (pressed) color else White,
-                fontSize = 12.sp,
+                text = if (value > 0f) "${value.roundToInt()}%  ·  KEEP HOLDING" else "DRAG TO SET  ·  RELEASE TO RESET",
+                color = if (value > 0f) color else White,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Black,
-                letterSpacing = 1.1.sp
+                letterSpacing = 0.65.sp,
+                textAlign = TextAlign.Center,
+                maxLines = 1
             )
         }
         Text(hint, color = Muted, fontSize = 8.sp, letterSpacing = 0.7.sp, modifier = Modifier.align(Alignment.End))
