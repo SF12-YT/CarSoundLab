@@ -68,12 +68,12 @@ jobs:
 
       - name: Package complete source tree
         run: |
-          zip -qr CarSoundLab_v1.23.0_RecordingDriven_FullSource.zip . \
+          zip -qr CarSoundLab_v1.23.1_FullSource.zip . \
             -x '.git/*' '*/.git/*' \
                '.gradle/*' '*/.gradle/*' \
                'app/build/*' '*/build/*' \
                'local.properties' '*.jks' '*.keystore' \
-               'CarSoundLab_v1.23.0_RecordingDriven_FullSource.zip'
+               'CarSoundLab_v1.23.1_FullSource.zip'
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7
@@ -85,6 +85,6 @@ jobs:
       - name: Upload full source artifact
         uses: actions/upload-artifact@v7
         with:
-          name: car-sound-lab-recording-driven-source
-          path: CarSoundLab_v1.23.0_RecordingDriven_FullSource.zip
+          name: car-sound-lab-v1.23.1-full-source
+          path: CarSoundLab_v1.23.1_FullSource.zip
           if-no-files-found: error

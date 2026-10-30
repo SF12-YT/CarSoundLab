@@ -15,7 +15,7 @@
 - `app/src/main/cpp/native_audio.cpp`: state-gated onboard layers, smooth gain fades, loop-seam crossfades and conservative RPM-linked playback; existing gear-shift samples retained.
 - `app/src/main/assets/sample-bank/reference_high_speed_loop.wav`: Suzuka high-speed seventh-gear excerpt.
 - `app/src/main/assets/sample-bank/reference_corner_exit_loop.wav`: Suzuka third-gear corner-exit excerpt.
-- `app/build.gradle.kts`: app version 1.23.0 / version code 24.
+- `app/build.gradle.kts`: app version 1.23.1 / version code 25.
 - `.github/workflows/android-build.yml`: builds the APK and verifies the recorded clips are packaged byte-for-byte.
 
 Existing assets, including the RB21 side-profile image and gear-shift bank, are preserved.
